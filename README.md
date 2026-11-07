@@ -10,38 +10,72 @@ synthetic credit-card transactions and deployed behind a REST API with a polishe
 * Model = one JSON file (weights + scaler + threshold + metrics); a trained model is committed in `models/`.
 * `fraudnet serve` exposes a validated JSON API and a single-page UI (light/dark, responsive, accessible,
   no CDN, no external assets).
-* 40 GoogleTest cases incl. a numerical gradient check, metric correctness on known inputs, scaler,
-  serialization round-trip, HTTP integration and an AUC > 0.9 training test.
+* 63 GoogleTest cases (~2 s): numerical gradient check, metric correctness, strict model-schema validation,
+  training/serving feature parity, concurrent-prediction consistency, HTTP integration (limits, versioned
+  routes, embedded UI) and seeded-reproducibility checks. Inference tests use a tiny committed model so they
+  stay fast and independent of the trainer.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-  G[Synthetic generator<br/>seeded RNG] -->|CSV| D[(data/transactions.csv)]
-  D --> S[Stratified split<br/>70 / 15 / 15]
-  S --> SC[StandardScaler<br/>fit on train only]
-  SC --> T[Trainer<br/>Adam + class weights<br/>early stopping on val PR-AUC]
-  T --> LR[Logistic regression<br/>baseline]
-  T --> NN[MLP 22-32-16-1]
-  NN --> TH[Threshold tuning<br/>max F1 on validation]
-  TH --> M[(models/fraudnet.json<br/>weights + scaler + threshold + metrics)]
-  M --> API[cpp-httplib REST API<br/>127.0.0.1]
-  API --> UI[Web UI<br/>analyze / model / batch]
-  API --> CLI[CLI predict / evaluate]
+flowchart TD
+  CLI["fraudnet CLI<br/>generate / train / evaluate / predict / serve"]
+  subgraph server["fraudnet_server - REST API + web UI"]
+    SRV[ApiServer<br/>cpp-httplib, body limits]
+    API["handlers + validation<br/>/api/v1/*"]
+    UIA["web UI embedded in the binary"]
+  end
+  subgraph core["fraudnet_core - no HTTP, no CLI"]
+    GEN[synthetic generator / CSV]
+    FP["FeaturePipeline<br/>validate - engineer - standardize"]
+    TR["trainer: Adam, class weights,<br/>early stopping, metrics"]
+    FM["FraudModel artifact (JSON, schema v2)<br/>pipeline + net + threshold + metadata"]
+    PRED["Predictor<br/>immutable, thread-safe"]
+  end
+  CLI --> server
+  CLI --> core
+  SRV --> API --> PRED
+  SRV --> UIA
+  GEN --> TR --> FM
+  TR --> FP
+  PRED --> FM --> FP
 ```
+
+Design rules (see [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md) for the full review and decisions):
+
+* **Dependency direction** is enforced by CMake targets: `fraudnet_core` (data, features, model, training,
+  inference) knows nothing about HTTP or the CLI; `fraudnet_server` depends on core; the `fraudnet` executable
+  depends on both.
+* **One feature pipeline.** `FeaturePipeline` (validate, engineer 11 inputs into 22 columns, standardize) is the
+  only way to turn a transaction into network input. Training builds its matrices with the same per-row call the
+  server uses, so training/serving skew cannot creep in; a test checks this bit for bit.
+* **Immutable inference.** The server owns a `Predictor` (`shared_ptr<const FraudModel>`), so concurrent
+  requests need no locks.
+* **Strict model artifact.** `schema_version`, the ordered feature list, the one-hot category order, scaler,
+  network and threshold are all validated on load; a mismatch fails with a precise message instead of
+  silently mis-scoring.
+* **Self-contained binary.** The UI is compiled in at build time, so `fraudnet.exe` runs from any directory.
 
 Source layout (`src/`):
 
-| File | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `generator.*`, `csv.*` | Synthetic transactions, CSV read/write with line-numbered errors |
-| `features.*` | 11 raw inputs -> 22 engineered columns; feature groups used for explanations |
-| `scaler.*`, `mlp.*`, `trainer.*` | Standardization, network with analytic back-propagation, Adam trainer |
-| `metrics.*` | Confusion matrix, ROC/PR AUC, curves, threshold search |
-| `model.*`, `pipeline.*` | Deployable model (JSON I/O, explanations), end-to-end training pipeline |
-| `api.*`, `server.*` | Input validation + JSON handlers, HTTP server and static UI hosting |
-| `main.cpp` | CLI (`generate`, `train`, `evaluate`, `predict`, `serve`) |
-| `ui/` | `index.html`, `style.css`, `app.js` (vanilla, served by `serve`) |
+| `core/generator.*`, `core/csv.*` | Synthetic transactions, CSV read/write with line-numbered errors |
+| `core/features.*`, `core/feature_pipeline.*` | Feature definitions and domain checks; the single raw -> network-input pipeline |
+| `core/scaler.*`, `core/mlp.*`, `core/trainer.*`, `core/numeric.hpp` | Standardization, network with analytic back-propagation, Adam trainer, stable sigmoid/softplus |
+| `core/metrics.*` | Confusion matrix, ROC/PR AUC, curves, threshold search |
+| `core/model.*`, `core/predictor.*`, `core/pipeline.*` | Model artifact (strict JSON I/O), immutable inference + explanations, end-to-end training pipeline |
+| `server/api.*`, `server/server.*`, `server/ui_assets.*` | Validation + JSON handlers, HTTP server (versioned routes, limits), embedded UI |
+| `cli/main.cpp` | CLI (`generate`, `train`, `evaluate`, `predict`, `serve`) |
+| `ui/` | `index.html`, `style.css`, `app.js` (vanilla); embedded into the binary at build time |
+| `cmake/embed_ui.cmake` | Build-time generator for the embedded UI (pure CMake, no extra tools) |
+
+### Model file format
+
+`models/fraudnet.json` is a single JSON document: `format` (`fraudnet-model`), `schema_version` (`2`), ordered
+`features` and `categories`, `scaler` (mean/std), `network` (layer sizes, weights, biases, activations),
+`threshold`, plus metadata (`version`, `created_at`, `training` config with seeds, `metrics` incl. ROC/PR
+curves). Loading checks all of it; models from an older/newer schema are rejected with a clear error.
 
 ## Model card
 
@@ -53,6 +87,8 @@ Source layout (`src/`):
 | Model | MLP 22 -> 32 -> 16 -> 1 (1,281 parameters), ReLU, Adam (lr 0.003, batch 256, L2 1e-5), fraud class weight 7.05 (= sqrt(neg/pos)) |
 | Early stopping | validation PR-AUC, patience 8; best epoch 8 of 16 |
 | Threshold | 0.9074, chosen to maximize F1 on the **validation** set |
+
+Retrained with v1.1.0 (model schema 2); training is fully seeded, so the metrics reproduced the v1.0.0 numbers exactly.
 
 Held-out **test set** (18,000 transactions, 355 fraud), threshold 0.9074:
 
@@ -72,21 +108,25 @@ how well the pipeline works, **not** how it would perform on real card traffic. 
 
 ## Build
 
-Requires CMake >= 3.20 and a C++20 compiler (developed with Visual Studio 2022 Build Tools / MSVC 19.44).
-Dependencies (nlohmann/json, cpp-httplib, GoogleTest) are fetched from their official GitHub repos by CMake.
+Requires CMake >= 3.25 (for presets; the project itself needs 3.20) and a C++20 compiler (developed with
+Visual Studio 2022 Build Tools / MSVC 19.44). Dependencies (nlohmann/json, cpp-httplib, GoogleTest) are
+fetched from their official GitHub repos by CMake.
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+cmake --preset msvc                      # Windows; use `release` (Ninja) on Linux/macOS
+cmake --build --preset msvc-release
+ctest --preset msvc-release              # 63 tests, ~2 s
+cmake --install build/msvc --config Release --prefix dist    # fraudnet.exe + model + docs
 ```
 
-The code builds warning-free at `/W4` (`-Wall -Wextra -Wpedantic` on other compilers).
+Without presets: `cmake -S . -B build -G "Visual Studio 17 2022" -A x64` then `cmake --build build --config Release`.
+Options: `-DFRAUDNET_BUILD_TESTS=OFF` skips GoogleTest, `-DFRAUDNET_WARNINGS_AS_ERRORS=ON` (preset `msvc-strict`)
+turns warnings into errors. All FraudNet code builds warning-free at `/W4` (`-Wall -Wextra -Wpedantic` elsewhere).
 
 ## Run
 
 ```powershell
-$fn = ".\build\Release\fraudnet.exe"
+$fn = ".\build\msvc\Release\fraudnet.exe"
 & $fn --version
 & $fn generate --rows 120000 --seed 42 --out data/transactions.csv
 & $fn train --data data/transactions.csv --out models/fraudnet.json
@@ -95,9 +135,11 @@ $fn = ".\build\Release\fraudnet.exe"
 & $fn serve --port 8080          # open http://127.0.0.1:8080
 ```
 
-`serve` finds `models/fraudnet.json` and `ui/` relative to the working directory or the executable (override
-with `--model` / `--ui`). It only binds to `127.0.0.1`. Run `fraudnet --help` for all options, e.g.
-`train --hidden 64,32 --lr 0.002 --epochs 100 --patience 10 --class-weight 10`.
+The web UI is **embedded in the executable**, so it can be copied and run from any directory. When `--model`
+is omitted the model is looked up in `$FRAUDNET_MODEL`, then `models/fraudnet.json` near the working directory
+or executable, then `<prefix>/share/fraudnet/models/` (installed layout). `serve` only binds to `127.0.0.1`;
+`--ui DIR` serves the UI from a folder instead (handy while editing `ui/`), `--no-ui` serves the API only. Run
+`fraudnet --help` for all options, e.g. `train --hidden 64,32 --lr 0.002 --epochs 100 --patience 10 --class-weight 10`.
 
 ## Web UI
 
@@ -110,13 +152,13 @@ with `--model` / `--ui`). It only binds to `127.0.0.1`. Run `fraudnet --help` fo
 
 ## API
 
-All bodies are JSON. Errors use `{"error": "<code>", "message": "...", "details": [...]}`.
+All bodies are JSON. Routes are versioned under `/api/v1`; the old unversioned `/api/*` paths still work as aliases but answer with `Deprecation: true` and a `Link` to the successor. Request bodies are limited (64 KiB for `predict`, 4 MiB for `predict/batch`; HTTP 413) and must be `application/json` (HTTP 415). Errors use `{"error": "<code>", "message": "...", "details": [...]}`.
 
 ```powershell
-curl http://127.0.0.1:8080/api/health
-curl http://127.0.0.1:8080/api/model
+curl http://127.0.0.1:8080/api/v1/health
+curl http://127.0.0.1:8080/api/v1/model
 
-curl -X POST http://127.0.0.1:8080/api/predict -H "Content-Type: application/json" -d '{
+curl -X POST http://127.0.0.1:8080/api/v1/predict -H "Content-Type: application/json" -d '{
   "amount": 900, "hour": 3, "merchant_category": "electronics",
   "distance_from_home_km": 800, "distance_from_last_txn_km": 400,
   "txn_count_1h": 4, "txn_count_24h": 8, "avg_amount_30d": 45,
@@ -135,12 +177,12 @@ curl -X POST http://127.0.0.1:8080/api/predict -H "Content-Type: application/jso
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /api/health` | Status, server/model version, uptime |
-| `GET /api/model` | Version, threshold, test/validation metrics, ROC/PR curves, training info, input schema |
-| `POST /api/predict` | One transaction -> probability, label, risk level, top-5 contributing features |
-| `POST /api/predict/batch` | `{"transactions": [...]}` (or a bare array, max 10,000) -> per-row results and flagged count |
+| `GET /api/v1/health` | Status, server/model version, uptime |
+| `GET /api/v1/model` | Version, threshold, test/validation metrics, ROC/PR curves, training info, input schema |
+| `POST /api/v1/predict` | One transaction -> probability, label, risk level, top-5 contributing features |
+| `POST /api/v1/predict/batch` | `{"transactions": [...]}` (or a bare array, max 10,000) -> per-row results and flagged count |
 
-Validation reports every problem at once, e.g. `POST /api/predict` with `{"amount": -5, "hour": 25}` returns
+Validation reports every problem at once, e.g. `POST /api/v1/predict` with `{"amount": -5, "hour": 25}` returns
 HTTP 400 with `details` such as `amount: must be between 0 and 10000000 (got -5)` and
 `merchant_category: required field is missing`. Batch errors are prefixed with the row, e.g.
 `transactions[1].hour: ...`. Unknown fields are rejected.
@@ -148,7 +190,8 @@ HTTP 400 with `details` such as `amount: must be between 0 and 10000000 (got -5)
 ## Project layout
 
 ```
-CMakeLists.txt  src/  tests/  ui/  models/fraudnet.json  data/sample_transactions.csv  CHANGELOG.md
+CMakeLists.txt  CMakePresets.json  cmake/  src/{core,server,cli}/  tests/  tests/data/test_model.json
+ui/  models/fraudnet.json  data/sample_transactions.csv  ARCHITECTURE_REVIEW.md  CHANGELOG.md
 ```
 
 `data/transactions.csv` is generated locally and git-ignored; `data/sample_transactions.csv` (150 rows) is
