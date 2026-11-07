@@ -1,0 +1,8 @@
+build/
+_deps/
+out/
+*.png
+data/*.csv
+!data/sample_transactions.csv
+*.user
+.vs/
