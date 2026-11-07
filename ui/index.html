@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>FraudNet - Transaction Risk Console</title>
+  <meta name="description" content="Score card transactions for fraud with a neural network written from scratch in C++.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/analyze" aria-label="FraudNet home">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="currentColor"/>
+          <path d="M7 21.5 12.5 14l4 4.5L25 9.5" fill="none" stroke="var(--on-accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="25" cy="9.5" r="2.6" fill="var(--danger-soft-fg)"/>
+        </svg>
+        <span class="brand-name">FraudNet</span>
+        <span class="pill" id="version-pill" hidden></span>
+      </a>
+
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <a role="tab" id="tab-analyze" href="#/analyze" aria-controls="view-analyze" data-view="analyze">Analyze</a>
+        <a role="tab" id="tab-model" href="#/model" aria-controls="view-model" data-view="model">Model</a>
+        <a role="tab" id="tab-batch" href="#/batch" aria-controls="view-batch" data-view="batch">Batch</a>
+      </nav>
+
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch to dark theme" title="Toggle light / dark theme">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path class="sun" d="M12 4V2m0 20v-2m8-8h2M2 12h2m13.66-5.66 1.41-1.41M4.93 19.07l1.41-1.41m0-11.32L4.93 4.93m14.14 14.14-1.41-1.41M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path class="moon" d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div id="global-error" class="banner banner-error" role="alert" hidden></div>
+
+    <!-- ===================== ANALYZE ===================== -->
+    <section id="view-analyze" class="view" role="tabpanel" aria-labelledby="tab-analyze" hidden>
+      <div class="view-head">
+        <div>
+          <h1 id="h-analyze">Score a transaction</h1>
+          <p class="lede">Adjust the inputs and the model re-scores instantly. Bars show which signals pushed the risk up or down.</p>
+        </div>
+        <div class="presets" role="group" aria-label="Example transactions">
+          <span class="presets-label">Try an example</span>
+          <div class="chip-row" id="preset-row"></div>
+        </div>
+      </div>
+
+      <div class="analyze-grid">
+        <form id="tx-form" class="card" autocomplete="off" novalidate aria-labelledby="form-title">
+          <h2 id="form-title" class="card-title">Transaction details</h2>
+          <div class="fields" id="fields"></div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="reset-btn">Reset</button>
+            <button type="button" class="btn btn-ghost" id="copy-json-btn">Copy as JSON</button>
+          </div>
+        </form>
+
+        <div class="result-col">
+          <section class="card result-card" aria-labelledby="result-title" aria-live="polite">
+            <h2 id="result-title" class="card-title">Fraud probability</h2>
+            <div class="gauge-wrap">
+              <svg id="gauge" class="gauge" viewBox="0 0 260 150" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Fraud probability">
+                <defs>
+                  <linearGradient id="gauge-grad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stop-color="var(--ok)"/>
+                    <stop offset="0.55" stop-color="var(--warn)"/>
+                    <stop offset="1" stop-color="var(--danger)"/>
+                  </linearGradient>
+                </defs>
+                <path class="gauge-track" d="M 30 130 A 100 100 0 0 1 230 130" pathLength="100"/>
+                <path class="gauge-value" id="gauge-value" d="M 30 130 A 100 100 0 0 1 230 130" pathLength="100" stroke-dasharray="0 100"/>
+                <g id="gauge-threshold"><line class="gauge-tick" x1="0" y1="-112" x2="0" y2="-88"/></g>
+                <text id="gauge-text" class="gauge-text" x="130" y="118" text-anchor="middle">--</text>
+                <text class="gauge-sub" x="130" y="142" text-anchor="middle" id="gauge-sub">&nbsp;</text>
+                <text class="gauge-end" x="30" y="148" text-anchor="middle">0</text>
+                <text class="gauge-end" x="230" y="148" text-anchor="middle">100%</text>
+              </svg>
+            </div>
+            <div class="verdict" id="verdict" data-state="idle">
+              <span class="verdict-dot" aria-hidden="true"></span>
+              <span id="verdict-text">Waiting for input</span>
+            </div>
+            <p class="muted small" id="verdict-detail"></p>
+          </section>
+
+          <section class="card" aria-labelledby="explain-title">
+            <h2 id="explain-title" class="card-title">Why this score?</h2>
+            <p class="muted small">Contribution to the log-odds of fraud when each signal is replaced by its typical (training mean) value.</p>
+            <ul class="explain" id="explain" aria-live="polite"></ul>
+            <div class="legend small muted" aria-hidden="true">
+              <span><i class="swatch swatch-danger"></i>raises risk</span>
+              <span><i class="swatch swatch-ok"></i>lowers risk</span>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== MODEL ===================== -->
+    <section id="view-model" class="view" role="tabpanel" aria-labelledby="tab-model" hidden>
+      <div class="view-head">
+        <div>
+          <h1 id="h-model">Model performance</h1>
+          <p class="lede" id="model-lede">Held-out test set metrics for the deployed network.</p>
+        </div>
+      </div>
+
+      <div class="stat-grid" id="stat-grid"></div>
+
+      <div class="model-grid">
+        <section class="card" aria-labelledby="cm-title">
+          <h2 class="card-title" id="cm-title">Confusion matrix</h2>
+          <div id="cm"></div>
+        </section>
+        <section class="card" aria-labelledby="roc-title">
+          <h2 class="card-title" id="roc-title">ROC curve</h2>
+          <div id="roc" class="chart"></div>
+        </section>
+        <section class="card" aria-labelledby="pr-title">
+          <h2 class="card-title" id="pr-title">Precision-recall curve</h2>
+          <div id="pr" class="chart"></div>
+        </section>
+        <section class="card" aria-labelledby="loss-title">
+          <h2 class="card-title" id="loss-title">Training history</h2>
+          <div id="loss" class="chart"></div>
+        </section>
+        <section class="card wide" aria-labelledby="cmp-title">
+          <h2 class="card-title" id="cmp-title">Baseline comparison (test set)</h2>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Baseline comparison table">
+            <table class="table" id="cmp-table"></table>
+          </div>
+        </section>
+        <section class="card wide" aria-labelledby="info-title">
+          <h2 class="card-title" id="info-title">Model card</h2>
+          <dl class="kv" id="model-info"></dl>
+        </section>
+      </div>
+    </section>
+
+    <!-- ===================== BATCH ===================== -->
+    <section id="view-batch" class="view" role="tabpanel" aria-labelledby="tab-batch" hidden>
+      <div class="view-head">
+        <div>
+          <h1 id="h-batch">Batch scoring</h1>
+          <p class="lede">Upload a CSV of transactions to score them all at once. An optional <code>is_fraud</code> column lets the page measure accuracy for you.</p>
+        </div>
+      </div>
+
+      <section class="card">
+        <div class="dropzone" id="dropzone">
+          <svg viewBox="0 0 24 24" width="32" height="32" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p><strong>Drop a CSV here</strong> or</p>
+          <label class="btn btn-primary" for="csv-input">Choose file</label>
+          <input id="csv-input" type="file" accept=".csv,text/csv" class="sr-only">
+          <p class="muted small">Required columns: <code id="csv-cols"></code></p>
+        </div>
+        <div class="form-actions left">
+          <button type="button" class="btn btn-ghost" id="example-btn">Score built-in example</button>
+          <button type="button" class="btn btn-ghost" id="template-btn">Download CSV template</button>
+        </div>
+        <div id="batch-error" class="banner banner-error" role="alert" hidden></div>
+      </section>
+
+      <section id="batch-results" class="card" hidden aria-labelledby="batch-title">
+        <div class="batch-head">
+          <h2 class="card-title" id="batch-title">Results</h2>
+          <div class="batch-actions">
+            <label class="check"><input type="checkbox" id="flagged-only"> <span>Flagged only</span></label>
+            <button type="button" class="btn btn-ghost" id="download-btn">Download results</button>
+          </div>
+        </div>
+        <div class="stat-grid compact" id="batch-stats"></div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Scored transactions table">
+          <table class="table" id="batch-table"></table>
+        </div>
+        <div class="pager" id="pager"></div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>FraudNet &middot; neural network trained from scratch in C++20</span>
+    <span class="muted">Synthetic data only - not for production decisions.</span>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
