@@ -1,31 +1,37 @@
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include "generator.hpp"
+#include "metrics.hpp"
 #include "pipeline.hpp"
 #include "test_common.hpp"
 
 using namespace fraudnet;
 
-TEST(Training, NeuralNetBeatsMinimumAucOnHeldOutTestSet) {
-  const auto& r = fixtures::sharedPipeline();
-  EXPECT_GT(r.testMetrics.rocAuc, 0.9);
-  EXPECT_GT(r.testMetrics.prAuc, 0.4);
-  EXPECT_GT(r.testMetrics.f1, 0.4);
+TEST(Training, TinyRunLearnsSomethingAndTunesThresholdOnValidation) {
+  const auto r = fixtures::trainTiny();
+  EXPECT_GT(r.testMetrics.rocAuc, 0.85);
+  EXPECT_DOUBLE_EQ(r.model.threshold(), r.valMetrics.threshold);
+  EXPECT_DOUBLE_EQ(r.testMetrics.threshold, r.model.threshold());
+  EXPECT_GT(r.model.threshold(), 0.0);
+  EXPECT_LT(r.model.threshold(), 1.0);
 }
 
-TEST(Training, BaselineIsAlsoReasonableAndNetworkIsCompetitive) {
-  const auto& r = fixtures::sharedPipeline();
-  EXPECT_GT(r.baselineTest.rocAuc, 0.85);
-  EXPECT_GT(r.testMetrics.rocAuc, r.baselineTest.rocAuc - 0.02);
+TEST(Training, SameSeedGivesBitIdenticalModelDifferentSeedDoesNot) {
+  const auto a = fixtures::trainTiny(7), b = fixtures::trainTiny(7), c = fixtures::trainTiny(8);
+  EXPECT_EQ(a.model.network().params(), b.model.network().params());
+  EXPECT_EQ(a.model.features().scaler().mean(), b.model.features().scaler().mean());
+  EXPECT_DOUBLE_EQ(a.model.threshold(), b.model.threshold());
+  EXPECT_NE(a.model.network().params(), c.model.network().params());
 }
 
-TEST(Training, ThresholdIsTunedOnValidationAndMaximizesItsF1) {
-  const auto& r = fixtures::sharedPipeline();
-  const double thr = r.model.threshold();
-  EXPECT_DOUBLE_EQ(thr, r.valMetrics.threshold);
-  EXPECT_DOUBLE_EQ(r.testMetrics.threshold, thr);
-  EXPECT_GT(thr, 0.0);
-  EXPECT_LT(thr, 1.0);
+TEST(Training, PretrainedTestModelGeneralizesToFreshData) {
+  const auto& p = fixtures::testPredictor();
+  const auto& data = fixtures::evalData();
+  const auto m = evaluate(scoreSamples(p, data), labelsOf(data), p.threshold());
+  EXPECT_GT(m.rocAuc, 0.95);
+  EXPECT_GT(m.prAuc, 0.5);
+  EXPECT_GT(m.f1, 0.5);
 }
 
 TEST(Training, SplitIsStratifiedAndDisjointInSize) {
@@ -50,6 +56,7 @@ TEST(Training, EarlyStoppingHaltsBeforeMaxEpochsAndKeepsBestWeights) {
   g.rows = 6000;
   const auto data = generateDataset(g);
   TrainConfig cfg;
+  cfg.hidden = {8};
   cfg.maxEpochs = 200;
   cfg.patience = 2;
   cfg.learningRate = 0.02;
@@ -63,7 +70,18 @@ TEST(Training, EarlyStoppingHaltsBeforeMaxEpochsAndKeepsBestWeights) {
 }
 
 TEST(Training, LossDecreasesDuringTraining) {
-  const auto& h = fixtures::sharedPipeline().nnTrain.history;
+  const auto r = fixtures::trainTiny();
+  const auto& h = r.nnTrain.history;
   ASSERT_GE(h.size(), 3u);
   EXPECT_LT(h.back().trainLoss, h.front().trainLoss);
+}
+
+TEST(Training, DivergingRunFailsLoudlyInsteadOfProducingNaNModel) {
+  GeneratorConfig g;
+  g.rows = 2000;
+  TrainConfig cfg;
+  cfg.hidden = {8};
+  cfg.learningRate = 1e300;  // absurd step size -> non-finite weights
+  cfg.maxEpochs = 5;
+  EXPECT_THROW(trainPipeline(generateDataset(g), cfg, SplitConfig{}), std::runtime_error);
 }

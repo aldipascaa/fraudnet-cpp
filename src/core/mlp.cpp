@@ -4,19 +4,10 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "numeric.hpp"
 #include "util.hpp"
 
 namespace fraudnet {
-
-namespace {
-double sigmoid(double z) {
-  if (z >= 0) return 1.0 / (1.0 + std::exp(-z));
-  const double e = std::exp(z);
-  return e / (1.0 + e);
-}
-// log(1 + exp(z)) without overflow
-double softplus(double z) { return z > 0 ? z + std::log1p(std::exp(-z)) : std::log1p(std::exp(z)); }
-}  // namespace
 
 Mlp::Mlp(std::vector<std::size_t> sizes, std::uint64_t seed) : sizes_(std::move(sizes)) {
   if (sizes_.size() < 2 || sizes_.back() != 1) throw std::invalid_argument("Mlp: sizes must end with 1 output");
@@ -160,10 +151,16 @@ Mlp Mlp::fromJson(const nlohmann::json& j) {
   const auto& layers = j.at("layers");
   if (layers.size() + 1 != m.sizes_.size()) throw std::runtime_error("network: layer count mismatch");
   for (std::size_t l = 0; l + 1 < m.sizes_.size(); ++l) {
+    const std::string act = layers[l].at("activation").get<std::string>();
+    const std::string wantAct = (l + 2 < m.sizes_.size()) ? "relu" : "linear";
+    if (act != wantAct)
+      throw std::runtime_error("network: layer " + std::to_string(l) + " has activation '" + act + "', expected '" + wantAct + "'");
     const auto w = layers[l].at("weights").get<std::vector<double>>();
     const auto b = layers[l].at("bias").get<std::vector<double>>();
     const std::size_t in = m.sizes_[l], out = m.sizes_[l + 1];
     if (w.size() != in * out || b.size() != out) throw std::runtime_error("network: weight shape mismatch");
+    for (double v : w) if (!std::isfinite(v)) throw std::runtime_error("network: non-finite weight");
+    for (double v : b) if (!std::isfinite(v)) throw std::runtime_error("network: non-finite bias");
     std::copy(w.begin(), w.end(), m.params_.begin() + static_cast<std::ptrdiff_t>(m.offsets_[l]));
     std::copy(b.begin(), b.end(), m.params_.begin() + static_cast<std::ptrdiff_t>(m.offsets_[l] + in * out));
   }

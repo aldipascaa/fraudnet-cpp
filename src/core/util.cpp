@@ -126,11 +126,12 @@ std::optional<std::string> findUpward(const std::string& relative) {
       p = p.parent_path();
     }
   }
-#ifdef FRAUDNET_SOURCE_DIR
-  std::error_code ec;
-  if (fs::exists(fs::path(FRAUDNET_SOURCE_DIR) / relative, ec))
-    return (fs::path(FRAUDNET_SOURCE_DIR) / relative).string();
-#endif
+  // Installed layout: <prefix>/bin/fraudnet(.exe) + <prefix>/share/fraudnet/<relative>
+  {
+    std::error_code ec;
+    const fs::path shared = fs::path(executableDir()).parent_path() / "share" / "fraudnet" / relative;
+    if (fs::exists(shared, ec)) return shared.string();
+  }
   return std::nullopt;
 }
 

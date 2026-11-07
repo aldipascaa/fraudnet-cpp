@@ -36,7 +36,8 @@ class Rng {
 };
 
 std::string isoTimestampUtc();
-/// Looks for `relative` in cwd, the executable directory and their parents.
+/// Looks for `relative` in cwd, the executable directory and their parents, then in the installed
+/// layout (<prefix>/share/fraudnet/). Never uses build-time paths.
 std::optional<std::string> findUpward(const std::string& relative);
 std::string executableDir();
 std::vector<std::string> splitString(const std::string& s, char sep);

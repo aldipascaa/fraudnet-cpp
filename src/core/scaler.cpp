@@ -50,6 +50,8 @@ StandardScaler StandardScaler::fromJson(const nlohmann::json& j) {
   s.std_ = j.at("std").get<std::vector<double>>();
   if (s.mean_.size() != s.std_.size() || s.mean_.empty())
     throw std::runtime_error("scaler: mean/std size mismatch");
+  for (double v : s.mean_)
+    if (!std::isfinite(v)) throw std::runtime_error("scaler: non-finite mean");
   for (double v : s.std_)
     if (!(v > 0)) throw std::runtime_error("scaler: non-positive std");
   return s;

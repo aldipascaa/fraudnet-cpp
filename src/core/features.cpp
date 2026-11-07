@@ -53,7 +53,22 @@ const std::vector<std::string>& columnNames() { return layout().names; }
 const std::vector<std::size_t>& columnGroups() { return layout().groups; }
 const std::vector<std::string>& groupNames() { return kGroups; }
 
+void validateTransaction(const Transaction& tx) {
+  auto nonNegative = [](double v, const char* name) {
+    if (!std::isfinite(v) || v < 0) throw std::invalid_argument(std::string(name) + " must be a finite, non-negative number");
+  };
+  nonNegative(tx.amount, "amount");
+  nonNegative(tx.distance_from_home_km, "distance_from_home_km");
+  nonNegative(tx.distance_from_last_txn_km, "distance_from_last_txn_km");
+  nonNegative(tx.avg_amount_30d, "avg_amount_30d");
+  nonNegative(tx.account_age_days, "account_age_days");
+  if (tx.hour < 0 || tx.hour > 23) throw std::invalid_argument("hour must be within 0..23");
+  if (tx.txn_count_1h < 0 || tx.txn_count_24h < 0) throw std::invalid_argument("transaction counts must be non-negative");
+  if (categoryIndex(tx.merchant_category) < 0) throw std::invalid_argument("unknown merchant_category: " + tx.merchant_category);
+}
+
 std::vector<double> extractFeatures(const Transaction& tx) {
+  validateTransaction(tx);
   std::vector<double> f;
   f.reserve(numFeatures());
   f.push_back(std::log1p(tx.amount));
@@ -62,7 +77,6 @@ std::vector<double> extractFeatures(const Transaction& tx) {
   f.push_back(std::cos(ang));
   f.push_back(tx.hour <= 5 ? 1.0 : 0.0);
   const int ci = categoryIndex(tx.merchant_category);
-  if (ci < 0) throw std::invalid_argument("unknown merchant_category: " + tx.merchant_category);
   for (int i = 0; i < static_cast<int>(kCategories.size()); ++i) f.push_back(i == ci ? 1.0 : 0.0);
   f.push_back(std::log1p(tx.distance_from_home_km));
   f.push_back(std::log1p(tx.distance_from_last_txn_km));

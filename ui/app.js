@@ -136,7 +136,7 @@
     { key: 'is_foreign', type: 'bool', label: 'Foreign merchant' },
   ];
 
-  let schema = [];          // from /api/model
+  let schema = [];          // from /api/v1/model
   let modelInfo = null;
   const state = { ...DEFAULTS };
   const inputs = {};        // key -> {num, range, err}
@@ -241,7 +241,7 @@
     if (!validateClient()) { setIdle('Fix the highlighted fields'); return; }
     const mine = ++seq;
     try {
-      const r = await api('/api/predict', { ...state });
+      const r = await api('/api/v1/predict', { ...state });
       if (mine !== seq) return;
       $('#global-error').hidden = true;
       renderResult(r);
@@ -507,7 +507,7 @@
       const out = [];
       for (let off = 0; off < txs.length; off += 10000) {
         const chunk = txs.slice(off, off + 10000);
-        const r = await api('/api/predict/batch', { transactions: chunk });
+        const r = await api('/api/v1/predict/batch', { transactions: chunk });
         r.results.forEach((x) => out.push({ ...x, index: off + x.index }));
       }
       batch.rows = out.map((r, i) => ({ n: i + 1, tx: txs[i], probability: r.probability, is_fraud: r.is_fraud, top: r.top_features[0], actual: labels ? labels[i] : null }));
@@ -648,7 +648,7 @@
   async function boot() {
     route();
     try {
-      const [health, info] = await Promise.all([api('/api/health'), api('/api/model')]);
+      const [health, info] = await Promise.all([api('/api/v1/health'), api('/api/v1/model')]);
       modelInfo = info;
       schema = info.input_schema;
       const pill = $('#version-pill');

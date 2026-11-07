@@ -70,6 +70,8 @@ TrainResult trainMlp(const Matrix& xTrain, const std::vector<int>& yTrain, const
     EpochLog log;
     log.epoch = epoch;
     log.trainLoss = lossSum / static_cast<double>(std::max<std::size_t>(1, batches));
+    if (!std::isfinite(log.trainLoss))
+      throw std::runtime_error("training diverged (non-finite loss at epoch " + std::to_string(epoch) + "); try a lower --lr");
     double score = static_cast<double>(epoch) * 1e-12;  // no validation data: keep the latest epoch
     if (xVal.rows > 0) {
       const auto p = net.predictProba(xVal);

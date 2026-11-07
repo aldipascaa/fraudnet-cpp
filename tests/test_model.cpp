@@ -1,81 +1,168 @@
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 #include "model.hpp"
+#include "predictor.hpp"
 #include "test_common.hpp"
 
 using namespace fraudnet;
+using nlohmann::json;
 
 namespace {
-Transaction sampleTx() {
-  Transaction t;
-  t.amount = 900;
-  t.hour = 3;
-  t.merchant_category = "electronics";
-  t.distance_from_home_km = 800;
-  t.distance_from_last_txn_km = 400;
-  t.txn_count_1h = 4;
-  t.txn_count_24h = 8;
-  t.avg_amount_30d = 45;
-  t.card_present = false;
-  t.is_foreign = true;
-  t.account_age_days = 20;
-  return t;
+json goodModelJson() { return fixtures::testPredictor().model().toJson(); }
+
+// Asserts fromJson throws ModelError whose message contains `fragment`.
+void expectRejected(const json& j, const std::string& fragment) {
+  try {
+    FraudModel::fromJson(j);
+    FAIL() << "model was accepted; expected an error mentioning: " << fragment;
+  } catch (const ModelError& e) {
+    EXPECT_NE(std::string(e.what()).find(fragment), std::string::npos) << "actual message: " << e.what();
+  }
 }
 }  // namespace
 
 TEST(Serialization, JsonRoundTripGivesIdenticalPredictions) {
-  const auto& model = fixtures::sharedPipeline().model;
-  const auto text = model.toJson().dump();
-  const auto restored = FraudModel::fromJson(nlohmann::json::parse(text));
+  const auto& model = fixtures::testPredictor().model();
+  const auto restored = FraudModel::fromJson(json::parse(model.toJson().dump()));
   EXPECT_DOUBLE_EQ(restored.threshold(), model.threshold());
   EXPECT_EQ(restored.network().params(), model.network().params());
-  const Transaction tx = sampleTx();
-  EXPECT_DOUBLE_EQ(restored.predictProba(tx), model.predictProba(tx));
-  // metadata survives too
+  EXPECT_EQ(restored.features().scaler().mean(), model.features().scaler().mean());
+  const Predictor a(restored);
+  const auto tx = fixtures::suspiciousTx();
+  EXPECT_DOUBLE_EQ(a.probability(tx), fixtures::testPredictor().probability(tx));
   EXPECT_EQ(restored.meta().at("metrics").at("test").at("roc_auc"), model.meta().at("metrics").at("test").at("roc_auc"));
 }
 
 TEST(Serialization, FileSaveAndLoad) {
-  const auto& model = fixtures::sharedPipeline().model;
+  const auto& model = fixtures::testPredictor().model();
   const auto path = (std::filesystem::temp_directory_path() / "fraudnet_test_model.json").string();
   model.save(path);
   const auto loaded = FraudModel::load(path);
-  EXPECT_DOUBLE_EQ(loaded.predictProba(sampleTx()), model.predictProba(sampleTx()));
+  EXPECT_DOUBLE_EQ(Predictor(loaded).probability(fixtures::suspiciousTx()),
+                   fixtures::testPredictor().probability(fixtures::suspiciousTx()));
   std::filesystem::remove(path);
 }
 
-TEST(Serialization, RejectsCorruptModels) {
-  EXPECT_THROW(FraudModel::load("definitely/not/here.json"), std::runtime_error);
-  EXPECT_THROW(FraudModel::fromJson(nlohmann::json{{"format", "other"}}), std::runtime_error);
-  auto j = fixtures::sharedPipeline().model.toJson();
+TEST(Serialization, ArtifactCarriesSchemaVersionFeatureListAndCategories) {
+  const auto j = goodModelJson();
+  EXPECT_EQ(j.at("format"), "fraudnet-model");
+  EXPECT_EQ(j.at("schema_version"), FraudModel::kSchemaVersion);
+  EXPECT_EQ(j.at("features").size(), numFeatures());
+  EXPECT_EQ(j.at("categories").size(), kCategories.size());
+  EXPECT_TRUE(j.contains("scaler") && j.contains("threshold") && j.contains("metrics") && j.contains("training"));
+}
+
+TEST(Serialization, CommittedProductionModelLoadsAndMatchesThisBuild) {
+  const auto m = FraudModel::load("models/fraudnet.json");
+  EXPECT_FALSE(m.meta().at("version").get<std::string>().empty());
+  const Predictor p(m);
+  EXPECT_GT(p.probability(fixtures::suspiciousTx()), p.threshold());
+  EXPECT_LT(p.probability(fixtures::typicalTx()), p.threshold());
+}
+
+TEST(SerializationErrors, MissingFileAndGarbage) {
+  EXPECT_THROW(FraudModel::load("definitely/not/here.json"), ModelError);
+  const auto path = (std::filesystem::temp_directory_path() / "fraudnet_garbage.json").string();
+  { std::ofstream(path) << "{ this is not json"; }
+  EXPECT_THROW(FraudModel::load(path), ModelError);
+  std::filesystem::remove(path);
+  expectRejected(json::array(), "must be a JSON object");
+}
+
+TEST(SerializationErrors, WrongFormatAndSchemaVersions) {
+  auto j = goodModelJson();
+  j["format"] = "other";
+  expectRejected(j, "not a FraudNet model");
+
+  j = goodModelJson();
+  j["format"] = "fraudnet-model/1";
+  j.erase("schema_version");
+  expectRejected(j, "legacy model format");
+
+  j = goodModelJson();
+  j.erase("schema_version");
+  expectRejected(j, "schema_version");
+
+  j = goodModelJson();
+  j["schema_version"] = FraudModel::kSchemaVersion + 1;
+  expectRejected(j, "newer than this build supports");
+
+  j = goodModelJson();
+  j["schema_version"] = FraudModel::kSchemaVersion - 1;
+  expectRejected(j, "no longer supported");
+}
+
+TEST(SerializationErrors, FeatureListMustMatchExactlyIncludingOrder) {
+  auto j = goodModelJson();
+  std::swap(j["features"][1], j["features"][2]);  // same set, different order
+  expectRejected(j, "features mismatch at position 1");
+
+  j = goodModelJson();
   j["features"].push_back("extra");
-  EXPECT_THROW(FraudModel::fromJson(j), std::runtime_error);
-  j = fixtures::sharedPipeline().model.toJson();
+  expectRejected(j, "this build expects");
+
+  j = goodModelJson();
+  j["features"].erase(j["features"].size() - 1);
+  expectRejected(j, "features");
+
+  j = goodModelJson();
+  j["features"][0] = "amount_raw";
+  expectRejected(j, "model has 'amount_raw', this build expects 'log_amount'");
+
+  j = goodModelJson();
+  std::swap(j["categories"][0], j["categories"][1]);
+  expectRejected(j, "categories mismatch");
+
+  j = goodModelJson();
+  j.erase("features");
+  expectRejected(j, "missing the 'features' list");
+}
+
+TEST(SerializationErrors, BadParameters) {
+  auto j = goodModelJson();
   j["network"]["layers"][0]["weights"].erase(0);
-  EXPECT_THROW(FraudModel::fromJson(j), std::runtime_error);
+  expectRejected(j, "weight shape mismatch");
+
+  j = goodModelJson();
+  j["threshold"] = 1.5;
+  expectRejected(j, "threshold");
+
+  j = goodModelJson();
+  j["scaler"]["std"][0] = 0.0;
+  expectRejected(j, "non-positive std");
+
+  j = goodModelJson();
+  j["scaler"]["mean"].erase(0);
+  j["scaler"]["std"].erase(0);
+  expectRejected(j, "scaler has");
+
+  j = goodModelJson();
+  j["network"]["layers"][0]["activation"] = "tanh";
+  expectRejected(j, "activation");
+
+  j = goodModelJson();
+  j["network"]["layers"][0]["weights"][0] = "NaN";
+  expectRejected(j, "malformed model");
+
+  j = goodModelJson();
+  j.erase("network");
+  expectRejected(j, "malformed model");
 }
 
 TEST(Explanation, SortedByMagnitudeAndLimitedToTopK) {
-  const auto& model = fixtures::sharedPipeline().model;
-  const auto p = model.predict(sampleTx(), 4);
-  ASSERT_EQ(p.contributions.size(), 4u);
-  for (std::size_t i = 1; i < p.contributions.size(); ++i)
-    EXPECT_GE(std::fabs(p.contributions[i - 1].contribution), std::fabs(p.contributions[i].contribution));
-  EXPECT_TRUE(model.predict(sampleTx(), 0).contributions.empty());
+  const auto& p = fixtures::testPredictor();
+  const auto pred = p.predict(fixtures::suspiciousTx(), 4);
+  ASSERT_EQ(pred.contributions.size(), 4u);
+  for (std::size_t i = 1; i < pred.contributions.size(); ++i)
+    EXPECT_GE(std::fabs(pred.contributions[i - 1].contribution), std::fabs(pred.contributions[i].contribution));
+  EXPECT_TRUE(p.predict(fixtures::suspiciousTx(), 0).contributions.empty());
 }
 
 TEST(Explanation, SuspiciousTransactionScoresHigherThanTypicalOne) {
-  const auto& model = fixtures::sharedPipeline().model;
-  Transaction normal;
-  normal.amount = 40;
-  normal.hour = 13;
-  normal.merchant_category = "grocery";
-  normal.distance_from_home_km = 3;
-  normal.distance_from_last_txn_km = 2;
-  normal.avg_amount_30d = 55;
-  normal.account_age_days = 900;
-  EXPECT_GT(model.predictProba(sampleTx()), 0.5);
-  EXPECT_LT(model.predictProba(normal), model.threshold());
+  const auto& p = fixtures::testPredictor();
+  EXPECT_GT(p.probability(fixtures::suspiciousTx()), 0.5);
+  EXPECT_LT(p.probability(fixtures::typicalTx()), p.threshold());
 }

@@ -33,27 +33,11 @@ DataSplit stratifiedSplit(const std::vector<Sample>& all, const SplitConfig& cfg
   return out;
 }
 
-Matrix featureMatrix(const std::vector<Sample>& samples) {
-  Matrix m(samples.size(), numFeatures());
-  for (std::size_t i = 0; i < samples.size(); ++i) {
-    const auto f = extractFeatures(samples[i].tx);
-    std::copy(f.begin(), f.end(), m.row(i));
-  }
-  return m;
-}
-
 std::vector<int> labelsOf(const std::vector<Sample>& samples) {
   std::vector<int> y;
   y.reserve(samples.size());
   for (const auto& s : samples) y.push_back(s.label);
   return y;
-}
-
-std::vector<double> scoreSamples(const FraudModel& model, const std::vector<Sample>& samples) {
-  std::vector<double> s;
-  s.reserve(samples.size());
-  for (const auto& x : samples) s.push_back(model.predictProba(x.tx));
-  return s;
 }
 
 PipelineResult trainPipeline(const std::vector<Sample>& data, const TrainConfig& cfg, const SplitConfig& splitCfg,
@@ -63,12 +47,11 @@ PipelineResult trainPipeline(const std::vector<Sample>& data, const TrainConfig&
   const auto& sp = r.split;
   if (sp.train.empty() || sp.val.empty() || sp.test.empty()) throw std::runtime_error("dataset too small to split");
 
-  StandardScaler scaler;
-  const Matrix xTrainRaw = featureMatrix(sp.train);
-  scaler.fit(xTrainRaw);
-  const Matrix xTrain = scaler.transform(xTrainRaw);
-  const Matrix xVal = scaler.transform(featureMatrix(sp.val));
-  const Matrix xTest = scaler.transform(featureMatrix(sp.test));
+  // The same FeaturePipeline instance is stored in the model, so serving cannot drift from training.
+  const FeaturePipeline features = FeaturePipeline::fit(sp.train);
+  const Matrix xTrain = features.transform(sp.train);
+  const Matrix xVal = features.transform(sp.val);
+  const Matrix xTest = features.transform(sp.test);
   const auto yTrain = labelsOf(sp.train), yVal = labelsOf(sp.val), yTest = labelsOf(sp.test);
 
   // Baseline: logistic regression (no hidden layers).
@@ -95,7 +78,7 @@ PipelineResult trainPipeline(const std::vector<Sample>& data, const TrainConfig&
   r.roc = rocCurve(pt, yTest, 120);
   r.pr = prCurve(pt, yTest, 120);
 
-  r.model = FraudModel(scaler, r.nnTrain.net, thr);
+  r.model = FraudModel(features, r.nnTrain.net, thr);
   std::size_t fraud = 0;
   for (const auto& s : data) fraud += (s.label == 1);
 
@@ -107,8 +90,6 @@ PipelineResult trainPipeline(const std::vector<Sample>& data, const TrainConfig&
   meta["name"] = "FraudNet";
   meta["version"] = FRAUDNET_VERSION;
   meta["created_at"] = isoTimestampUtc();
-  meta["categories"] = nlohmann::json::array();
-  for (auto c : kCategories) meta["categories"].push_back(std::string(c));
   meta["training"] = {
       {"rows", data.size()},
       {"fraud_rows", fraud},

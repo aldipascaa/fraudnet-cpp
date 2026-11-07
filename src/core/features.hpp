@@ -36,6 +36,11 @@ struct Sample {
 /// Index of a category name, or -1.
 int categoryIndex(std::string_view name);
 
+/// Throws std::invalid_argument when a field is non-finite or outside the domain the feature
+/// transforms (log1p, one-hot, hour encoding) are defined on. extractFeatures() calls this, so
+/// every caller (training, CLI, API) is protected from NaN features.
+void validateTransaction(const Transaction& tx);
+
 /// Number of engineered numeric columns fed to the model.
 std::size_t numFeatures();
 /// Engineered feature vector for one transaction.

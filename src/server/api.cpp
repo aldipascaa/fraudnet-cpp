@@ -157,9 +157,9 @@ bool parseTransaction(const json& j, Transaction& tx, std::vector<std::string>& 
   return errors.size() == before;
 }
 
-json predictionToJson(const FraudModel& model, const Transaction& tx, std::size_t topK) {
-  const Prediction p = model.predict(tx, topK);
-  const double thr = model.threshold();
+json predictionToJson(const Predictor& predictor, const Transaction& tx, std::size_t topK) {
+  const Prediction p = predictor.predict(tx, topK);
+  const double thr = predictor.threshold();
   const char* risk = p.probability >= thr ? "high" : (p.probability >= 0.5 * thr ? "medium" : "low");
   json top = json::array();
   for (const auto& c : p.contributions)
@@ -191,17 +191,17 @@ bool parseBody(const std::string& body, json& out, ApiResult& err) {
 }
 }  // namespace
 
-ApiResult handlePredict(const FraudModel& model, const std::string& body) {
+ApiResult handlePredict(const Predictor& predictor, const std::string& body) {
   json j;
   ApiResult err;
   if (!parseBody(body, j, err)) return err;
   Transaction tx;
   std::vector<std::string> errors;
   if (!parseTransaction(j, tx, errors)) return errorResult(400, "validation_failed", "Invalid transaction", errors);
-  return {200, predictionToJson(model, tx, 5)};
+  return {200, predictionToJson(predictor, tx, 5)};
 }
 
-ApiResult handleBatch(const FraudModel& model, const std::string& body) {
+ApiResult handleBatch(const Predictor& predictor, const std::string& body) {
   json j;
   ApiResult err;
   if (!parseBody(body, j, err)) return err;
@@ -227,31 +227,33 @@ ApiResult handleBatch(const FraudModel& model, const std::string& body) {
   json results = json::array();
   std::size_t flagged = 0;
   for (std::size_t i = 0; i < txs.size(); ++i) {
-    json r = predictionToJson(model, txs[i], 3);
+    json r = predictionToJson(predictor, txs[i], 3);
     r["index"] = i;
     r.erase("threshold");
     flagged += r["is_fraud"].get<bool>() ? 1 : 0;
     results.push_back(std::move(r));
   }
-  return {200, {{"count", txs.size()}, {"flagged", flagged}, {"threshold", model.threshold()}, {"results", results}}};
+  return {200, {{"count", txs.size()}, {"flagged", flagged}, {"threshold", predictor.threshold()}, {"results", results}}};
 }
 
-ApiResult handleModelInfo(const FraudModel& model) {
-  json b = model.meta();
-  b["threshold"] = model.threshold();
+ApiResult handleModelInfo(const Predictor& predictor) {
+  json b = predictor.model().meta();
+  b["threshold"] = predictor.threshold();
   b["features"] = columnNames();
   b["feature_groups"] = groupNames();
-  b["network"] = {{"layer_sizes", model.network().sizes()}, {"parameters", model.network().numParams()}};
+  b["network"] = {{"layer_sizes", predictor.model().network().sizes()}, {"parameters", predictor.model().network().numParams()}};
   b["input_schema"] = inputSchema();
   b["server_version"] = FRAUDNET_VERSION;
+  b["schema_version"] = FraudModel::kSchemaVersion;
+  b["api_version"] = "v1";
   return {200, b};
 }
 
-ApiResult handleHealth(const FraudModel& model) {
+ApiResult handleHealth(const Predictor& predictor) {
   const double up = std::chrono::duration<double>(std::chrono::steady_clock::now() - kStart).count();
   return {200, {{"status", "ok"},
                 {"version", FRAUDNET_VERSION},
-                {"model_version", model.meta().value("version", "unknown")},
+                {"model_version", predictor.model().meta().value("version", "unknown")},
                 {"uptime_seconds", up}}};
 }
 

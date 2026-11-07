@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <set>
@@ -10,6 +12,7 @@
 #include "fraudnet/version.hpp"
 #include "generator.hpp"
 #include "pipeline.hpp"
+#include "predictor.hpp"
 #include "server.hpp"
 #include "util.hpp"
 
@@ -95,6 +98,7 @@ void usage() {
 std::string resolveModel(const Args& a) {
   const std::string given = a.str("model", "");
   if (!given.empty()) return given;
+  if (const char* env = std::getenv("FRAUDNET_MODEL"); env && *env) return env;
   if (auto p = findUpward("models/fraudnet.json")) return *p;
   throw std::runtime_error("no model found; pass --model FILE or run `fraudnet train` first");
 }
@@ -142,7 +146,14 @@ int cmdTrain(const Args& a) {
     const std::string h = a.str("hidden", "");
     if (h != "0" && !h.empty())
       for (const auto& part : splitString(h, ',')) {
-        const long v = std::stol(part);
+        long v = 0;
+        try {
+          std::size_t pos = 0;
+          v = std::stol(part, &pos);
+          if (pos != part.size()) throw std::invalid_argument(part);
+        } catch (const std::exception&) {
+          throw std::runtime_error("--hidden expects comma-separated integers (e.g. 32,16), got '" + h + "'");
+        }
         if (v <= 0 || v > 1024) throw std::runtime_error("--hidden sizes must be in 1..1024");
         cfg.hidden.push_back(static_cast<std::size_t>(v));
       }
@@ -176,14 +187,14 @@ int cmdTrain(const Args& a) {
 }
 
 int cmdEvaluate(const Args& a) {
-  const auto model = FraudModel::load(resolveModel(a));
+  const Predictor model(FraudModel::load(resolveModel(a)));
   const std::string dataPath = a.str("data", "data/transactions.csv");
   bool labeled = false;
   auto data = readCsv(dataPath, &labeled);
   if (!labeled) throw std::runtime_error("evaluation data needs an is_fraud column");
   const std::string which = a.str("split", "all");
   if (which == "test") {
-    const auto& sp = model.meta().at("training").at("split");
+    const auto& sp = model.model().meta().at("training").at("split");
     SplitConfig cfg;
     cfg.valFraction = sp.at("val_fraction");
     cfg.testFraction = sp.at("test_fraction");
@@ -200,7 +211,7 @@ int cmdEvaluate(const Args& a) {
 }
 
 int cmdPredict(const Args& a) {
-  const auto model = FraudModel::load(resolveModel(a));
+  const Predictor model(FraudModel::load(resolveModel(a)));
   if (a.has("json") || a.has("input")) {
     std::string text = a.str("json", "");
     if (a.has("input")) {
@@ -220,7 +231,7 @@ int cmdPredict(const Args& a) {
     const auto data = readCsv(a.str("csv", ""));
     std::printf("row,probability,label\n");
     for (std::size_t i = 0; i < data.size(); ++i) {
-      const double p = model.predictProba(data[i].tx);
+      const double p = model.probability(data[i].tx);
       std::printf("%zu,%.6f,%s\n", i, p, p >= model.threshold() ? "fraud" : "legit");
     }
     return 0;
@@ -229,19 +240,20 @@ int cmdPredict(const Args& a) {
 }
 
 int cmdServe(const Args& a) {
-  auto model = FraudModel::load(resolveModel(a));
-  std::string ui = a.str("ui", "");
-  if (ui.empty()) {
-    if (auto p = findUpward("ui/index.html")) ui = std::filesystem::path(*p).parent_path().string();
-  }
+  Predictor predictor(FraudModel::load(resolveModel(a)));
   const double portNum = a.num("port", 8080);
   if (portNum < 0 || portNum > 65535) throw std::runtime_error("--port must be within 0..65535");
-  const std::string version = model.meta().value("version", "?");
-  ApiServer server(std::move(model), ui);
+  const std::string version = predictor.model().meta().value("version", "?");
+  ServerOptions opts;
+  opts.serveUi = !a.flags.count("no-ui");
+  opts.uiOverrideDir = a.str("ui", "");
+  ApiServer server(std::move(predictor), opts);
   const int port = server.bind("127.0.0.1", static_cast<int>(portNum));
   std::printf("FraudNet %s (model %s) listening on http://127.0.0.1:%d\n", FRAUDNET_VERSION, version.c_str(), port);
-  if (ui.empty()) std::puts("Warning: ui/ directory not found - serving the API only (use --ui DIR).");
-  else std::printf("Web UI: %s\n", ui.c_str());
+  if (!opts.serveUi) std::puts("Web UI disabled (--no-ui): serving the API only.");
+  else if (opts.uiOverrideDir.empty()) std::puts("Web UI: embedded in the binary");
+  else std::printf("Web UI: %s (override)\n", opts.uiOverrideDir.c_str());
+  std::puts("API: /api/v1/{health,model,predict,predict/batch}");
   std::puts("Press Ctrl+C to stop.");
   std::fflush(stdout);
   server.run();

@@ -22,7 +22,6 @@ struct DataSplit {
 /// Stratified shuffle split (keeps the fraud rate in every part).
 DataSplit stratifiedSplit(const std::vector<Sample>& all, const SplitConfig& cfg);
 
-Matrix featureMatrix(const std::vector<Sample>& samples);
 std::vector<int> labelsOf(const std::vector<Sample>& samples);
 
 struct PipelineResult {
@@ -38,8 +37,5 @@ struct PipelineResult {
 /// the neural network (early stopping) -> tune F1 thresholds on validation -> evaluate on test.
 PipelineResult trainPipeline(const std::vector<Sample>& data, const TrainConfig& cfg, const SplitConfig& split,
                              const std::function<void(const std::string& model, const EpochLog&)>& onEpoch = {});
-
-/// Scores every sample with the model.
-std::vector<double> scoreSamples(const FraudModel& model, const std::vector<Sample>& samples);
 
 }  // namespace fraudnet
