@@ -11,7 +11,7 @@
   "atm",
   "jewelry"
  ],
- "created_at": "2026-11-07T15:57:21Z",
+ "created_at": "2026-11-07T22:35:44Z",
  "features": [
   "log_amount",
   "hour_sin",
@@ -36,7 +36,7 @@
   "is_foreign",
   "log_account_age"
  ],
- "format": "fraudnet-model/1",
+ "format": "fraudnet-model",
  "metrics": {
   "baseline_logreg_test": {
    "accuracy": 0.9929444444444444,
@@ -1968,6 +1968,7 @@
    1.033607890415615
   ]
  },
+ "schema_version": 2,
  "threshold": 0.907418636852821,
  "training": {
   "batch_size": 256,
@@ -2082,7 +2083,7 @@
   "optimizer": "adam",
   "positive_class_weight": 7.051569873521741,
   "rows": 120000,
-  "seconds": 5.1300852,
+  "seconds": 3.0484646,
   "seed": 42,
   "split": {
    "seed": 42,
@@ -2093,5 +2094,5 @@
   "train_rows": 84000,
   "val_rows": 18000
  },
- "version": "1.0.0"
+ "version": "1.1.0"
 }
