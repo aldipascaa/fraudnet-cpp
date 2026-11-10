@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-10
+
+### Added
+- **Adjustable decision threshold.** `POST /api/v1/predict` and `/predict/batch` accept `?threshold=` (0 to 1,
+  exclusive) and label with it instead of the threshold tuned into the model; responses carry
+  `threshold_source` (`model` or `request`). The Analyze page has a threshold slider with a "use the model
+  default" reset, and batch scoring from the UI uses the same setting. Scores themselves never change.
+- **Parallel batch scoring.** Batches of 512 or more transactions are split across up to 8 threads. Output
+  order and values are identical to sequential scoring (covered by a test).
+- GitHub Actions workflow that builds and tests on Windows (MSVC) and Linux (GCC).
+
 ## [1.1.0] - 2026-11-08
 
 Architecture review release; see [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md) for findings and decisions.

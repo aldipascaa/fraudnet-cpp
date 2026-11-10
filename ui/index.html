@@ -89,6 +89,12 @@
               <span id="verdict-text">Waiting for input</span>
             </div>
             <p class="muted small" id="verdict-detail"></p>
+            <div class="thr-control">
+              <label for="thr-slider">Decision threshold <output id="thr-out" for="thr-slider">--</output></label>
+              <input type="range" id="thr-slider" min="1" max="99" step="1" value="50" aria-describedby="thr-help">
+              <p class="muted small" id="thr-help">Lower it to catch more fraud (more false alarms); raise it to flag only the surest cases.</p>
+              <button type="button" class="btn btn-ghost" id="thr-reset" hidden>Use the model default</button>
+            </div>
           </section>
 
           <section class="card" aria-labelledby="explain-title">

@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 
 #include <httplib.h>
@@ -19,6 +20,16 @@ void send(httplib::Response& res, const ApiResult& r) {
 bool isJsonContentType(const std::string& ct) {
   // "application/json" optionally followed by parameters such as "; charset=utf-8"
   return ct.rfind("application/json", 0) == 0;
+}
+
+// Runs `fn` with the optional `?threshold=` override, or answers 400 when it is malformed.
+template <class Fn>
+ApiResult withThreshold(const httplib::Request& req, Fn&& fn) {
+  if (!req.has_param("threshold")) return fn(std::nullopt);
+  std::string error;
+  const auto thr = parseThreshold(req.get_param_value("threshold"), error);
+  if (!thr) return errorResult(400, "invalid_threshold", error);
+  return fn(thr);
 }
 }  // namespace
 
@@ -68,9 +79,13 @@ ApiServer::ApiServer(Predictor predictor, ServerOptions options)
   route("GET", "/health", 0, [](const Predictor& p, const httplib::Request&) { return handleHealth(p); });
   route("GET", "/model", 0, [](const Predictor& p, const httplib::Request&) { return handleModelInfo(p); });
   route("POST", "/predict", options_.maxSingleBodyBytes,
-        [](const Predictor& p, const httplib::Request& r) { return handlePredict(p, r.body); });
+        [](const Predictor& p, const httplib::Request& r) {
+          return withThreshold(r, [&](std::optional<double> t) { return handlePredict(p, r.body, t); });
+        });
   route("POST", "/predict/batch", options_.maxBodyBytes,
-        [](const Predictor& p, const httplib::Request& r) { return handleBatch(p, r.body); });
+        [](const Predictor& p, const httplib::Request& r) {
+          return withThreshold(r, [&](std::optional<double> t) { return handleBatch(p, r.body, t); });
+        });
 
   svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
     if (!res.body.empty()) return;  // handler already produced a body

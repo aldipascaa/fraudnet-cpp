@@ -298,3 +298,90 @@ TEST(ApiServer, ConcurrentHttpPredictionsAreConsistent) {
   EXPECT_EQ(failed.load(), 0);
   EXPECT_EQ(bad.load(), 0);
 }
+
+TEST(Api, ThresholdOverrideChangesTheLabelButNotTheScore) {
+  const auto& m = fixtures::testPredictor();
+  const auto base = handlePredict(m, validTx().dump());
+  ASSERT_EQ(base.status, 200);
+  EXPECT_EQ(base.body["threshold_source"], "model");
+  EXPECT_DOUBLE_EQ(base.body["threshold"].get<double>(), m.threshold());
+  const double p = base.body["probability"].get<double>();
+  ASSERT_GT(p, 0.0);
+  ASSERT_LT(p, 1.0);
+
+  // A threshold just below the score flags it; one just above clears it.
+  const auto low = handlePredict(m, validTx().dump(), p * 0.5);
+  EXPECT_EQ(low.body["is_fraud"], true);
+  EXPECT_EQ(low.body["label"], "fraud");
+  EXPECT_EQ(low.body["threshold_source"], "request");
+  EXPECT_DOUBLE_EQ(low.body["threshold"].get<double>(), p * 0.5);
+  const auto high = handlePredict(m, validTx().dump(), p + (1.0 - p) * 0.5);
+  EXPECT_EQ(high.body["is_fraud"], false);
+  EXPECT_EQ(high.body["label"], "legit");
+  for (const auto* r : {&low, &high}) EXPECT_DOUBLE_EQ(r->body["probability"].get<double>(), p);
+
+  const auto batch = handleBatch(m, json{{"transactions", json::array({validTx(), validTx()})}}.dump(), p * 0.5);
+  ASSERT_EQ(batch.status, 200);
+  EXPECT_EQ(batch.body["flagged"], 2);
+  EXPECT_EQ(batch.body["threshold_source"], "request");
+}
+
+TEST(Api, ParseThresholdAcceptsOnlyTheOpenUnitInterval) {
+  std::string error;
+  EXPECT_DOUBLE_EQ(parseThreshold("0.25", error).value(), 0.25);
+  EXPECT_DOUBLE_EQ(parseThreshold("1e-3", error).value(), 0.001);
+  for (const char* bad : {"", "0", "1", "-0.1", "1.5", "abc", "0.5x", " 0.5", "nan", "inf"}) {
+    error.clear();
+    EXPECT_FALSE(parseThreshold(bad, error).has_value()) << bad;
+    EXPECT_NE(error.find("threshold"), std::string::npos) << bad;
+  }
+}
+
+TEST(Api, LargeBatchScoredInParallelMatchesSequentialScoring) {
+  const auto& m = fixtures::testPredictor();
+  json txs = json::array();
+  const char* categories[] = {"grocery", "electronics", "travel"};
+  for (std::size_t i = 0; i < kParallelBatchMin * 3 + 7; ++i) {
+    json tx = validTx();
+    tx["amount"] = 5.0 + static_cast<double>(i % 97) * 31.5;
+    tx["hour"] = static_cast<int>(i % 24);
+    tx["merchant_category"] = categories[i % 3];
+    tx["is_foreign"] = i % 5 == 0;
+    txs.push_back(std::move(tx));
+  }
+  const auto r = handleBatch(m, json{{"transactions", txs}}.dump());
+  ASSERT_EQ(r.status, 200);
+  ASSERT_EQ(r.body["results"].size(), txs.size());
+  std::size_t flagged = 0;
+  for (std::size_t i = 0; i < txs.size(); ++i) {
+    const auto& got = r.body["results"][i];
+    const auto one = handlePredict(m, txs[i].dump());
+    ASSERT_EQ(got["index"], i);
+    ASSERT_DOUBLE_EQ(got["probability"].get<double>(), one.body["probability"].get<double>()) << "row " << i;
+    ASSERT_EQ(got["is_fraud"], one.body["is_fraud"]);
+    flagged += got["is_fraud"].get<bool>() ? 1 : 0;
+  }
+  EXPECT_EQ(r.body["flagged"], flagged);
+}
+
+TEST(ApiServer, ThresholdQueryParameterIsAppliedAndValidated) {
+  RunningServer rs;
+  httplib::Client cli("127.0.0.1", rs.port);
+  auto res = cli.Post("/api/v1/predict?threshold=0.000001", validTx().dump(), "application/json");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200);
+  const json body = json::parse(res->body);
+  EXPECT_EQ(body["threshold_source"], "request");
+  EXPECT_EQ(body["is_fraud"], body["probability"].get<double>() >= 0.000001);
+
+  res = cli.Post("/api/v1/predict/batch?threshold=0.5", json{{"transactions", json::array({validTx()})}}.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(json::parse(res->body)["threshold"], 0.5);
+
+  for (const char* bad : {"/api/v1/predict?threshold=2", "/api/v1/predict?threshold=", "/api/v1/predict/batch?threshold=high"}) {
+    res = cli.Post(bad, validTx().dump(), "application/json");
+    ASSERT_TRUE(res) << bad;
+    EXPECT_EQ(res->status, 400) << bad;
+    EXPECT_EQ(json::parse(res->body)["error"], "invalid_threshold") << bad;
+  }
+}

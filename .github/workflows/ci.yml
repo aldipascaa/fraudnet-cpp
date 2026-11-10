@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake --preset msvc
+      - run: cmake --build --preset msvc-release
+      - run: ctest --preset msvc-release
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake --preset release
+      - run: cmake --build --preset release
+      - run: ctest --preset release

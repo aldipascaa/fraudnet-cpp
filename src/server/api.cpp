@@ -1,8 +1,12 @@
 #include "api.hpp"
 
 #include <chrono>
+#include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <exception>
 #include <set>
+#include <thread>
 
 #include "fraudnet/version.hpp"
 
@@ -157,9 +161,10 @@ bool parseTransaction(const json& j, Transaction& tx, std::vector<std::string>& 
   return errors.size() == before;
 }
 
-json predictionToJson(const Predictor& predictor, const Transaction& tx, std::size_t topK) {
+json predictionToJson(const Predictor& predictor, const Transaction& tx, std::size_t topK, std::optional<double> threshold) {
   const Prediction p = predictor.predict(tx, topK);
-  const double thr = predictor.threshold();
+  const double thr = threshold.value_or(predictor.threshold());
+  const bool isFraud = p.probability >= thr;
   const char* risk = p.probability >= thr ? "high" : (p.probability >= 0.5 * thr ? "medium" : "low");
   json top = json::array();
   for (const auto& c : p.contributions)
@@ -168,10 +173,11 @@ json predictionToJson(const Predictor& predictor, const Transaction& tx, std::si
                    {"contribution", c.contribution},
                    {"direction", c.contribution >= 0 ? "increases_risk" : "decreases_risk"}});
   return {{"probability", p.probability},
-          {"is_fraud", p.isFraud},
-          {"label", p.isFraud ? "fraud" : "legit"},
+          {"is_fraud", isFraud},
+          {"label", isFraud ? "fraud" : "legit"},
           {"risk_level", risk},
           {"threshold", thr},
+          {"threshold_source", threshold ? "request" : "model"},
           {"top_features", top}};
 }
 
@@ -191,17 +197,17 @@ bool parseBody(const std::string& body, json& out, ApiResult& err) {
 }
 }  // namespace
 
-ApiResult handlePredict(const Predictor& predictor, const std::string& body) {
+ApiResult handlePredict(const Predictor& predictor, const std::string& body, std::optional<double> threshold) {
   json j;
   ApiResult err;
   if (!parseBody(body, j, err)) return err;
   Transaction tx;
   std::vector<std::string> errors;
   if (!parseTransaction(j, tx, errors)) return errorResult(400, "validation_failed", "Invalid transaction", errors);
-  return {200, predictionToJson(predictor, tx, 5)};
+  return {200, predictionToJson(predictor, tx, 5, threshold)};
 }
 
-ApiResult handleBatch(const Predictor& predictor, const std::string& body) {
+ApiResult handleBatch(const Predictor& predictor, const std::string& body, std::optional<double> threshold) {
   json j;
   ApiResult err;
   if (!parseBody(body, j, err)) return err;
@@ -224,16 +230,67 @@ ApiResult handleBatch(const Predictor& predictor, const std::string& body) {
   }
   if (!errors.empty()) return errorResult(400, "validation_failed", "Invalid transactions in batch", errors);
 
+  // Score. Predictor is immutable and thread-safe, so large batches are split across threads;
+  // every worker writes only its own slots, which keeps the output order deterministic.
+  std::vector<json> scored(txs.size());
+  const auto scoreRange = [&](std::size_t begin, std::size_t end) {
+    for (std::size_t i = begin; i < end; ++i) {
+      json r = predictionToJson(predictor, txs[i], 3, threshold);
+      r["index"] = i;
+      r.erase("threshold");
+      r.erase("threshold_source");
+      scored[i] = std::move(r);
+    }
+  };
+  const std::size_t workers = txs.size() < kParallelBatchMin
+                                  ? 1
+                                  : std::clamp<std::size_t>(std::thread::hardware_concurrency(), 1, 8);
+  if (workers == 1) {
+    scoreRange(0, txs.size());
+  } else {
+    std::vector<std::exception_ptr> failures(workers);
+    {
+      std::vector<std::jthread> pool;
+      const std::size_t chunk = (txs.size() + workers - 1) / workers;
+      for (std::size_t w = 0; w < workers; ++w) {
+        const std::size_t begin = std::min(txs.size(), w * chunk), end = std::min(txs.size(), begin + chunk);
+        pool.emplace_back([&, w, begin, end] {
+          try {
+            scoreRange(begin, end);
+          } catch (...) {
+            failures[w] = std::current_exception();
+          }
+        });
+      }
+    }  // jthreads join here
+    for (const auto& f : failures)
+      if (f) std::rethrow_exception(f);
+  }
+
   json results = json::array();
   std::size_t flagged = 0;
-  for (std::size_t i = 0; i < txs.size(); ++i) {
-    json r = predictionToJson(predictor, txs[i], 3);
-    r["index"] = i;
-    r.erase("threshold");
+  for (auto& r : scored) {
     flagged += r["is_fraud"].get<bool>() ? 1 : 0;
     results.push_back(std::move(r));
   }
-  return {200, {{"count", txs.size()}, {"flagged", flagged}, {"threshold", predictor.threshold()}, {"results", results}}};
+  return {200,
+          {{"count", txs.size()},
+           {"flagged", flagged},
+           {"threshold", threshold.value_or(predictor.threshold())},
+           {"threshold_source", threshold ? "request" : "model"},
+           {"results", results}}};
+}
+
+std::optional<double> parseThreshold(const std::string& raw, std::string& error) {
+  double v = 0;
+  const char* first = raw.data();
+  const char* last = raw.data() + raw.size();
+  const auto [end, ec] = std::from_chars(first, last, v);
+  if (raw.empty() || ec != std::errc() || end != last || !std::isfinite(v) || v <= 0.0 || v >= 1.0) {
+    error = "threshold must be a number greater than 0 and less than 1 (got '" + raw + "')";
+    return std::nullopt;
+  }
+  return v;
 }
 
 ApiResult handleModelInfo(const Predictor& predictor) {

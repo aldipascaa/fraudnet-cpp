@@ -144,7 +144,8 @@ or executable, then `<prefix>/share/fraudnet/models/` (installed layout). `serve
 ## Web UI
 
 * **Analyze** - sliders/inputs for every field, preset examples, live probability gauge with the decision
-  threshold marker, and diverging bars that explain the score.
+  threshold marker, a decision-threshold slider (try a stricter or looser cut-off without retraining), and
+  diverging bars that explain the score.
 * **Model** - metric cards, confusion matrix, ROC curve, precision-recall curve, training history,
   baseline comparison and model card (all drawn as inline SVG).
 * **Batch** - upload a CSV (drag & drop), sortable/paginated results, flagged-only filter, download scored
@@ -180,7 +181,11 @@ curl -X POST http://127.0.0.1:8080/api/v1/predict -H "Content-Type: application/
 | `GET /api/v1/health` | Status, server/model version, uptime |
 | `GET /api/v1/model` | Version, threshold, test/validation metrics, ROC/PR curves, training info, input schema |
 | `POST /api/v1/predict` | One transaction -> probability, label, risk level, top-5 contributing features |
-| `POST /api/v1/predict/batch` | `{"transactions": [...]}` (or a bare array, max 10,000) -> per-row results and flagged count |
+| `POST /api/v1/predict/batch` | `{"transactions": [...]}` (or a bare array, max 10,000) -> per-row results and flagged count; batches of 512+ are scored on several threads |
+
+Both predict endpoints accept `?threshold=0.5` (a number between 0 and 1, exclusive) to label with a different
+decision threshold than the one tuned into the model. The probability is unchanged; the response reports
+`"threshold_source": "request"` instead of `"model"`. A malformed value answers 400 `invalid_threshold`.
 
 Validation reports every problem at once, e.g. `POST /api/v1/predict` with `{"amount": -5, "hour": 25}` returns
 HTTP 400 with `details` such as `amount: must be between 0 and 10000000 (got -5)` and

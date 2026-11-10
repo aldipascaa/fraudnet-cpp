@@ -237,11 +237,15 @@
     timer = setTimeout(predictNow, 120);
   }
 
+  // Decision threshold chosen with the slider; null = use the one tuned into the model.
+  let thrOverride = null;
+  const thresholdQuery = () => (thrOverride == null ? '' : '?threshold=' + thrOverride);
+
   async function predictNow() {
     if (!validateClient()) { setIdle('Fix the highlighted fields'); return; }
     const mine = ++seq;
     try {
-      const r = await api('/api/v1/predict', { ...state });
+      const r = await api('/api/v1/predict' + thresholdQuery(), { ...state });
       if (mine !== seq) return;
       $('#global-error').hidden = true;
       renderResult(r);
@@ -279,6 +283,9 @@
     gauge.setAttribute('aria-valuenow', pct.toFixed(1));
     gauge.setAttribute('aria-valuetext', `${text} fraud probability, ${r.label}`);
     placeThreshold(r.threshold);
+    $('#thr-out').textContent = fmtPct(r.threshold, 0) + (r.threshold_source === 'request' ? ' (custom)' : ' (model default)');
+    $('#thr-reset').hidden = r.threshold_source !== 'request';
+    if (r.threshold_source !== 'request') $('#thr-slider').value = String(Math.round(r.threshold * 100));
 
     const v = $('#verdict');
     v.dataset.state = r.is_fraud ? 'fraud' : 'legit';
@@ -320,6 +327,8 @@
       }
     });
     $('#tx-form').addEventListener('submit', (e) => e.preventDefault());
+    $('#thr-slider').addEventListener('input', (e) => { thrOverride = Number(e.target.value) / 100; $('#thr-out').textContent = e.target.value + '% (custom)'; schedule(); });
+    $('#thr-reset').addEventListener('click', () => { thrOverride = null; predictNow(); });
     buildForm();
     $('#csv-cols').textContent = schema.map((f) => f.name).join(', ');
     placeThreshold(modelInfo ? modelInfo.threshold : 0.5);
@@ -507,7 +516,7 @@
       const out = [];
       for (let off = 0; off < txs.length; off += 10000) {
         const chunk = txs.slice(off, off + 10000);
-        const r = await api('/api/v1/predict/batch', { transactions: chunk });
+        const r = await api('/api/v1/predict/batch' + thresholdQuery(), { transactions: chunk });
         r.results.forEach((x) => out.push({ ...x, index: off + x.index }));
       }
       batch.rows = out.map((r, i) => ({ n: i + 1, tx: txs[i], probability: r.probability, is_fraud: r.is_fraud, top: r.top_features[0], actual: labels ? labels[i] : null }));
